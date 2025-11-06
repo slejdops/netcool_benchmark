@@ -1,8 +1,12 @@
 # Netcool Environment Audit & Benchmark Tool
 
+**Version 2.0** - Now with JSON/XML export, historical trending, and active stress testing!
+
 ## Overview
 
-The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility designed to audit, profile, and benchmark IBM Tivoli Netcool/OMNIbus environments. It performs read-only assessments of your Netcool infrastructure against IBM best practices and generates detailed health and tuning reports.
+The `netcool_audit.sh` script is a comprehensive bash utility designed to audit, profile, and benchmark IBM Tivoli Netcool/OMNIbus environments. It performs assessments of your Netcool infrastructure against IBM best practices and generates detailed health and tuning reports.
+
+**New in v2.0**: Machine-readable output formats (JSON/XML), historical trend analysis, and optional active stress testing capabilities.
 
 ## Features
 
@@ -14,11 +18,18 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 - **Netcool Impact**: JVM configuration, cluster setup, service health
 - **WebGUI/JazzSM**: JVM settings, service status, log analysis
 
+### NEW in v2.0: Advanced Features
+
+- **JSON/XML Export** (`--format json|xml`): Machine-readable output for integration with monitoring systems, dashboards, and automation pipelines
+- **Historical Trending** (`--enable-trending`, `--compare-previous`): Track audit results over time, compare with previous runs, identify trends
+- **Active Stress Testing** (`--stress-test`): Inject synthetic events to measure ObjectServer performance under load (optional, requires confirmation)
+
 ### Safety First
 
-- **100% Read-Only**: No modifications to configurations or services
-- **Non-Intrusive**: Does not restart services or inject test events
-- **Production Safe**: Can be run on live production systems without risk
+- **Standard Mode: 100% Read-Only**: No modifications to configurations or services
+- **Non-Intrusive**: Does not restart services or inject events (unless `--stress-test` is explicitly used)
+- **Production Safe**: Standard audit mode can be run on live production systems without risk
+- **Stress Test Mode**: Optional active testing with safety confirmations and automatic cleanup
 
 ### Intelligent Analysis
 
@@ -26,6 +37,7 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 - **Embedded Baselines**: Built-in IBM recommended best practices for comparison
 - **Color-Coded Output**: Green (Pass), Yellow (Warning), Red (Failure) for easy interpretation
 - **Actionable Recommendations**: Specific remediation steps for identified issues
+- **Structured Export**: Full audit results available in JSON or XML format
 
 ## Requirements
 
@@ -73,7 +85,7 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 ### Basic Usage
 
 ```bash
-# Run with default settings
+# Run standard audit (read-only)
 ./netcool_audit.sh
 
 # Run with verbose output
@@ -89,7 +101,28 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 ./netcool_audit.sh --no-color
 ```
 
+### NEW v2.0 Usage Examples
+
+```bash
+# Export as JSON
+./netcool_audit.sh --format json --output audit_report.json
+
+# Export as XML
+./netcool_audit.sh --format xml --output audit_report.xml
+
+# Enable historical trending
+./netcool_audit.sh --enable-trending --compare-previous
+
+# Run stress test (requires confirmation)
+./netcool_audit.sh --stress-test --stress-events 500
+
+# Combined: trending + JSON export
+./netcool_audit.sh --enable-trending --format json --output report.json
+```
+
 ### Command-Line Options
+
+#### Standard Options
 
 | Option | Description |
 |--------|-------------|
@@ -98,7 +131,20 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 | `--no-color` | Disable colored output (for log files) |
 | `--verbose`, `-v` | Enable detailed debug logging |
 | `--skip-sql` | Skip ObjectServer SQL queries |
-| `--stress-test` | (Future) Enable active stress testing |
+
+#### NEW v2.0 Options
+
+| Option | Description |
+|--------|-------------|
+| `--format FORMAT` | Output format: `text` (default), `json`, or `xml` |
+| `--enable-trending` | Save results for historical comparison |
+| `--compare-previous` | Compare with previous audit results |
+| `--history-dir DIR` | Custom directory for historical data |
+| `--stress-test` | Enable active stress testing (requires confirmation) |
+| `--stress-events COUNT` | Number of test events (default: 100) |
+| `--stress-duration SEC` | Observation period in seconds (default: 60) |
+
+See [FEATURES_V2.md](FEATURES_V2.md) for detailed documentation on new features.
 
 ### Example Workflows
 
@@ -106,6 +152,31 @@ The `netcool_audit.sh` script is a comprehensive, safe-to-run bash utility desig
 
 ```bash
 ./netcool_audit.sh --skip-sql
+```
+
+#### JSON Export for Monitoring Integration
+
+```bash
+# Generate JSON and send to monitoring system
+./netcool_audit.sh --format json | curl -X POST https://monitoring.company.com/api/netcool \
+  -H "Content-Type: application/json" \
+  -d @-
+```
+
+#### Weekly Trending Report
+
+```bash
+# Add to cron for weekly comparison
+./netcool_audit.sh --compare-previous --enable-trending \
+  --output /var/log/netcool/weekly_audit.txt
+```
+
+#### Pre-Deployment Stress Test
+
+```bash
+# Validate performance before go-live
+./netcool_audit.sh --stress-test --stress-events 1000 --stress-duration 120 \
+  --format json --output pre_deployment_test.json
 ```
 
 This performs a rapid assessment without requiring ObjectServer credentials.

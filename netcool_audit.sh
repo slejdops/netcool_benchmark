@@ -30,16 +30,26 @@ set -o pipefail
 ################################################################################
 
 # Script metadata
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="2.0"
 SCRIPT_START_TIME=$(date +%s)
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+TIMESTAMP_FILE=$(date '+%Y%m%d_%H%M%S')
 
 # Output configuration
 OUTPUT_FILE=""
+OUTPUT_FORMAT="text"  # text, json, or xml
 USE_COLOR=true
 VERBOSE=false
 SKIP_SQL=false
 STRESS_TEST=false
+STRESS_TEST_EVENTS=100
+STRESS_TEST_DURATION=60
+
+# Historical trending configuration
+ENABLE_TRENDING=false
+HISTORY_DIR="${HOME}/.netcool_audit_history"
+HISTORY_FILE="${HISTORY_DIR}/audit_history.jsonl"
+COMPARE_WITH_PREVIOUS=false
 
 # Color codes (will be disabled if --no-color is set)
 RED='\033[0;31m'
@@ -55,6 +65,19 @@ declare -a PASSED_CHECKS=()
 declare -a WARNINGS=()
 declare -a FAILURES=()
 declare -a RECOMMENDATIONS=()
+
+# Structured data collection for JSON/XML export
+declare -A AUDIT_DATA=(
+    [script_version]="$SCRIPT_VERSION"
+    [audit_timestamp]="$TIMESTAMP"
+    [hostname]="$(hostname)"
+)
+
+# Individual test results for structured export
+declare -a TEST_RESULTS=()
+
+# Stress test results
+declare -A STRESS_TEST_RESULTS=()
 
 # Environment detection
 NCHOME=""
@@ -210,6 +233,495 @@ safe_exec() {
     return $?
 }
 
+# Record test result for structured output
+record_test_result() {
+    local test_name="$1"
+    local status="$2"  # pass, warn, fail
+    local value="$3"
+    local threshold="$4"
+    local message="$5"
+
+    local result_json="{\"test\":\"$test_name\",\"status\":\"$status\",\"value\":\"$value\",\"threshold\":\"$threshold\",\"message\":\"$(echo "$message" | sed 's/"/\\"/g')\"}"
+    TEST_RESULTS+=("$result_json")
+}
+
+# Escape string for JSON
+json_escape() {
+    echo "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\//\\\//g; s/\t/\\t/g' | tr '\n' ' '
+}
+
+# Escape string for XML
+xml_escape() {
+    echo "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'\''/\&apos;/g'
+}
+
+################################################################################
+# JSON/XML EXPORT FUNCTIONS
+################################################################################
+
+generate_json_output() {
+    local output_file="${1:-/dev/stdout}"
+
+    cat > "$output_file" << EOF
+{
+  "netcool_audit": {
+    "metadata": {
+      "script_version": "$SCRIPT_VERSION",
+      "audit_timestamp": "$TIMESTAMP",
+      "hostname": "$HOSTNAME",
+      "execution_time_seconds": $(($(date +%s) - SCRIPT_START_TIME))
+    },
+    "system_info": {
+      "os_type": "$OS_TYPE",
+      "os_version": "$(json_escape "$OS_VERSION")",
+      "cpu_cores": "${CPU_CORES:-unknown}",
+      "total_ram_mb": "${TOTAL_RAM_MB:-unknown}",
+      "nchome": "${NCHOME:-not detected}",
+      "omnihome": "${OMNIHOME:-not detected}",
+      "impact_home": "${IMPACT_HOME:-not detected}",
+      "webgui_home": "${WEBGUI_HOME:-not detected}"
+    },
+    "summary": {
+      "passed_checks": ${#PASSED_CHECKS[@]},
+      "warnings": ${#WARNINGS[@]},
+      "failures": ${#FAILURES[@]},
+      "recommendations": ${#RECOMMENDATIONS[@]}
+    },
+    "test_results": [
+EOF
+
+    # Output test results
+    local first=true
+    for result in "${TEST_RESULTS[@]}"; do
+        if [ "$first" = true ]; then
+            echo "      $result" >> "$output_file"
+            first=false
+        else
+            echo "      ,$result" >> "$output_file"
+        fi
+    done
+
+    cat >> "$output_file" << EOF
+    ],
+    "warnings": [
+EOF
+
+    # Output warnings
+    first=true
+    for warning in "${WARNINGS[@]}"; do
+        if [ "$first" = true ]; then
+            echo "      \"$(json_escape "$warning")\"" >> "$output_file"
+            first=false
+        else
+            echo "      ,\"$(json_escape "$warning")\"" >> "$output_file"
+        fi
+    done
+
+    cat >> "$output_file" << EOF
+    ],
+    "failures": [
+EOF
+
+    # Output failures
+    first=true
+    for failure in "${FAILURES[@]}"; do
+        if [ "$first" = true ]; then
+            echo "      \"$(json_escape "$failure")\"" >> "$output_file"
+            first=false
+        else
+            echo "      ,\"$(json_escape "$failure")\"" >> "$output_file"
+        fi
+    done
+
+    cat >> "$output_file" << EOF
+    ],
+    "recommendations": [
+EOF
+
+    # Output recommendations
+    first=true
+    for rec in "${RECOMMENDATIONS[@]}"; do
+        if [ "$first" = true ]; then
+            echo "      \"$(json_escape "$rec")\"" >> "$output_file"
+            first=false
+        else
+            echo "      ,\"$(json_escape "$rec")\"" >> "$output_file"
+        fi
+    done
+
+    # Add stress test results if available
+    if [ "$STRESS_TEST" = true ] && [ ${#STRESS_TEST_RESULTS[@]} -gt 0 ]; then
+        cat >> "$output_file" << EOF
+    ],
+    "stress_test_results": {
+EOF
+        first=true
+        for key in "${!STRESS_TEST_RESULTS[@]}"; do
+            if [ "$first" = true ]; then
+                echo "      \"$key\": \"${STRESS_TEST_RESULTS[$key]}\"" >> "$output_file"
+                first=false
+            else
+                echo "      ,\"$key\": \"${STRESS_TEST_RESULTS[$key]}\"" >> "$output_file"
+            fi
+        done
+        cat >> "$output_file" << EOF
+    }
+  }
+}
+EOF
+    else
+        cat >> "$output_file" << EOF
+    ]
+  }
+}
+EOF
+    fi
+}
+
+generate_xml_output() {
+    local output_file="${1:-/dev/stdout}"
+
+    cat > "$output_file" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<netcool_audit>
+  <metadata>
+    <script_version>$SCRIPT_VERSION</script_version>
+    <audit_timestamp>$TIMESTAMP</audit_timestamp>
+    <hostname>$HOSTNAME</hostname>
+    <execution_time_seconds>$(($(date +%s) - SCRIPT_START_TIME))</execution_time_seconds>
+  </metadata>
+  <system_info>
+    <os_type>$OS_TYPE</os_type>
+    <os_version>$(xml_escape "$OS_VERSION")</os_version>
+    <cpu_cores>${CPU_CORES:-unknown}</cpu_cores>
+    <total_ram_mb>${TOTAL_RAM_MB:-unknown}</total_ram_mb>
+    <nchome>${NCHOME:-not detected}</nchome>
+    <omnihome>${OMNIHOME:-not detected}</omnihome>
+    <impact_home>${IMPACT_HOME:-not detected}</impact_home>
+    <webgui_home>${WEBGUI_HOME:-not detected}</webgui_home>
+  </system_info>
+  <summary>
+    <passed_checks>${#PASSED_CHECKS[@]}</passed_checks>
+    <warnings>${#WARNINGS[@]}</warnings>
+    <failures>${#FAILURES[@]}</failures>
+    <recommendations>${#RECOMMENDATIONS[@]}</recommendations>
+  </summary>
+  <warnings>
+EOF
+
+    for warning in "${WARNINGS[@]}"; do
+        echo "    <warning>$(xml_escape "$warning")</warning>" >> "$output_file"
+    done
+
+    cat >> "$output_file" << EOF
+  </warnings>
+  <failures>
+EOF
+
+    for failure in "${FAILURES[@]}"; do
+        echo "    <failure>$(xml_escape "$failure")</failure>" >> "$output_file"
+    done
+
+    cat >> "$output_file" << EOF
+  </failures>
+  <recommendations>
+EOF
+
+    for rec in "${RECOMMENDATIONS[@]}"; do
+        echo "    <recommendation>$(xml_escape "$rec")</recommendation>" >> "$output_file"
+    done
+
+    cat >> "$output_file" << EOF
+  </recommendations>
+</netcool_audit>
+EOF
+}
+
+################################################################################
+# HISTORICAL TRENDING FUNCTIONS
+################################################################################
+
+save_audit_to_history() {
+    log_verbose "Saving audit results to history"
+
+    # Create history directory if it doesn't exist
+    if [ ! -d "$HISTORY_DIR" ]; then
+        mkdir -p "$HISTORY_DIR" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            log_warning "Could not create history directory: $HISTORY_DIR"
+            return 1
+        fi
+        log_verbose "Created history directory: $HISTORY_DIR"
+    fi
+
+    # Generate JSON for this audit
+    local temp_json="/tmp/netcool_audit_$TIMESTAMP_FILE.json"
+    generate_json_output "$temp_json"
+
+    # Append to history file (JSONL format - one JSON object per line)
+    cat "$temp_json" | tr '\n' ' ' | sed 's/  */ /g' >> "$HISTORY_FILE"
+    echo "" >> "$HISTORY_FILE"  # Newline for JSONL format
+
+    rm -f "$temp_json"
+
+    log_info "Audit results saved to history: $HISTORY_FILE"
+
+    # Keep only last 30 audits to prevent unbounded growth
+    if [ -f "$HISTORY_FILE" ]; then
+        local line_count=$(wc -l < "$HISTORY_FILE")
+        if [ "$line_count" -gt 30 ]; then
+            tail -30 "$HISTORY_FILE" > "${HISTORY_FILE}.tmp"
+            mv "${HISTORY_FILE}.tmp" "$HISTORY_FILE"
+            log_verbose "Trimmed history file to last 30 audits"
+        fi
+    fi
+}
+
+compare_with_previous_audit() {
+    if [ ! -f "$HISTORY_FILE" ]; then
+        log_info "No previous audit history found. Run with --enable-trending first."
+        return 0
+    fi
+
+    print_section "Historical Trend Analysis"
+
+    # Get the previous audit (second to last line)
+    local previous_audit=$(tail -2 "$HISTORY_FILE" 2>/dev/null | head -1)
+
+    if [ -z "$previous_audit" ]; then
+        log_info "Not enough history for comparison (need at least 2 audits)"
+        return 0
+    fi
+
+    # Extract key metrics from previous audit using basic text processing
+    local prev_warnings=$(echo "$previous_audit" | grep -o '"warnings":[0-9]*' | grep -o '[0-9]*')
+    local prev_failures=$(echo "$previous_audit" | grep -o '"failures":[0-9]*' | grep -o '[0-9]*')
+    local prev_passed=$(echo "$previous_audit" | grep -o '"passed_checks":[0-9]*' | grep -o '[0-9]*')
+    local prev_timestamp=$(echo "$previous_audit" | grep -o '"audit_timestamp":"[^"]*"' | cut -d'"' -f4)
+
+    local curr_warnings=${#WARNINGS[@]}
+    local curr_failures=${#FAILURES[@]}
+    local curr_passed=${#PASSED_CHECKS[@]}
+
+    log_info "Comparing with previous audit from: $prev_timestamp"
+    echo ""
+
+    # Compare warnings
+    local warn_diff=$((curr_warnings - prev_warnings))
+    if [ "$warn_diff" -gt 0 ]; then
+        print_color "$YELLOW" "  Warnings: $curr_warnings (▲ +$warn_diff from previous)"
+    elif [ "$warn_diff" -lt 0 ]; then
+        print_color "$GREEN" "  Warnings: $curr_warnings (▼ $warn_diff from previous) - Improved!"
+    else
+        print_color "$BLUE" "  Warnings: $curr_warnings (= no change)"
+    fi
+
+    # Compare failures
+    local fail_diff=$((curr_failures - prev_failures))
+    if [ "$fail_diff" -gt 0 ]; then
+        print_color "$RED" "  Failures: $curr_failures (▲ +$fail_diff from previous) - Degraded!"
+    elif [ "$fail_diff" -lt 0 ]; then
+        print_color "$GREEN" "  Failures: $curr_failures (▼ $fail_diff from previous) - Improved!"
+    else
+        print_color "$BLUE" "  Failures: $curr_failures (= no change)"
+    fi
+
+    # Compare passed checks
+    local pass_diff=$((curr_passed - prev_passed))
+    if [ "$pass_diff" -gt 0 ]; then
+        print_color "$GREEN" "  Passed Checks: $curr_passed (▲ +$pass_diff from previous) - Improved!"
+    elif [ "$pass_diff" -lt 0 ]; then
+        print_color "$YELLOW" "  Passed Checks: $curr_passed (▼ $pass_diff from previous)"
+    else
+        print_color "$BLUE" "  Passed Checks: $curr_passed (= no change)"
+    fi
+
+    echo ""
+
+    # Overall trend assessment
+    if [ "$fail_diff" -lt 0 ] && [ "$warn_diff" -le 0 ]; then
+        print_color "$BOLD$GREEN" "  Overall Trend: ✓ IMPROVING"
+    elif [ "$fail_diff" -gt 0 ]; then
+        print_color "$BOLD$RED" "  Overall Trend: ✗ DEGRADING"
+    elif [ "$warn_diff" -gt 0 ]; then
+        print_color "$BOLD$YELLOW" "  Overall Trend: ⚠ MIXED"
+    else
+        print_color "$BOLD$BLUE" "  Overall Trend: = STABLE"
+    fi
+
+    echo ""
+}
+
+################################################################################
+# STRESS TESTING FUNCTIONS
+################################################################################
+
+confirm_stress_test() {
+    print_section "Stress Test Confirmation Required"
+
+    print_color "$BOLD$RED" "⚠️  WARNING: STRESS TEST MODE ⚠️"
+    echo ""
+    print_color "$YELLOW" "Stress testing will:"
+    print_color "$YELLOW" "  • Inject $STRESS_TEST_EVENTS synthetic events into ObjectServer"
+    print_color "$YELLOW" "  • Generate load for approximately $STRESS_TEST_DURATION seconds"
+    print_color "$YELLOW" "  • Measure trigger performance and event processing rates"
+    print_color "$YELLOW" "  • May impact production operations during the test"
+    echo ""
+    print_color "$BOLD$YELLOW" "This is NOT a read-only operation!"
+    echo ""
+
+    read -p "Are you sure you want to proceed with stress testing? (yes/no): " confirm
+
+    if [ "$confirm" != "yes" ]; then
+        log_info "Stress testing cancelled by user"
+        STRESS_TEST=false
+        return 1
+    fi
+
+    log_info "Stress testing confirmed. Proceeding..."
+    return 0
+}
+
+run_stress_test() {
+    if [ "$STRESS_TEST" != true ]; then
+        return 0
+    fi
+
+    # Confirm before proceeding
+    if ! confirm_stress_test; then
+        return 0
+    fi
+
+    print_section "Active Stress Testing"
+
+    # Get ObjectServer credentials
+    echo ""
+    read -p "Enter ObjectServer name for stress test: " stress_server
+    if [ -z "$stress_server" ]; then
+        log_error "No ObjectServer name provided. Skipping stress test."
+        return 1
+    fi
+
+    read -p "Enter username (default: root): " stress_user
+    stress_user=${stress_user:-root}
+
+    read -sp "Enter password: " stress_pass
+    echo ""
+
+    if [ -z "$stress_pass" ]; then
+        log_error "No password provided. Skipping stress test."
+        return 1
+    fi
+
+    # Test connection
+    log_info "Testing connection to ObjectServer: $stress_server"
+    local test_query="SELECT COUNT(*) FROM alerts.status;"
+    local test_result=$(echo "$test_query" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" 2>&1)
+
+    if [ $? -ne 0 ]; then
+        log_error "Failed to connect to ObjectServer: $stress_server"
+        log_verbose "Error: $test_result"
+        return 1
+    fi
+
+    log_success "Connected to ObjectServer: $stress_server"
+
+    # Record starting alert count
+    local start_count=$(echo "SELECT COUNT(*) FROM alerts.status;" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" -batch 2>/dev/null | tail -1 | xargs)
+    log_info "Current alert count: $start_count"
+
+    # Start stress test
+    log_info "Injecting $STRESS_TEST_EVENTS test events..."
+    local start_time=$(date +%s)
+    local success_count=0
+    local error_count=0
+
+    for i in $(seq 1 $STRESS_TEST_EVENTS); do
+        local test_identifier="NETCOOL_AUDIT_TEST_$$_$i"
+        local insert_sql="INSERT INTO alerts.status (Identifier, Node, AlertGroup, Severity, Summary, LastOccurrence, FirstOccurrence, Type) VALUES ('$test_identifier', 'audit_test_node', 'AuditTest', 1, 'Stress test event $i', getdate(), getdate(), 1);"
+
+        local result=$(echo "$insert_sql" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" 2>&1)
+
+        if [ $? -eq 0 ]; then
+            ((success_count++))
+        else
+            ((error_count++))
+            log_verbose "Error inserting event $i: $result"
+        fi
+
+        # Show progress every 10 events
+        if [ $((i % 10)) -eq 0 ]; then
+            log_verbose "Injected $i/$STRESS_TEST_EVENTS events..."
+        fi
+
+        # Small delay to avoid overwhelming the server
+        sleep 0.1
+    done
+
+    local end_time=$(date +%s)
+    local injection_duration=$((end_time - start_time))
+
+    log_info "Event injection completed in $injection_duration seconds"
+    log_info "  Successful: $success_count"
+    log_info "  Errors: $error_count"
+
+    # Wait for processing
+    log_info "Waiting for event processing (may take up to $STRESS_TEST_DURATION seconds)..."
+    sleep "$STRESS_TEST_DURATION"
+
+    # Check final count
+    local end_count=$(echo "SELECT COUNT(*) FROM alerts.status;" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" -batch 2>/dev/null | tail -1 | xargs)
+    log_info "Final alert count: $end_count"
+
+    local net_increase=$((end_count - start_count))
+    log_info "Net increase: $net_increase events"
+
+    # Calculate metrics
+    local events_per_second=$(echo "scale=2; $success_count / $injection_duration" | bc 2>/dev/null || echo "N/A")
+
+    # Store results
+    STRESS_TEST_RESULTS["events_injected"]="$success_count"
+    STRESS_TEST_RESULTS["injection_errors"]="$error_count"
+    STRESS_TEST_RESULTS["injection_duration_sec"]="$injection_duration"
+    STRESS_TEST_RESULTS["events_per_second"]="$events_per_second"
+    STRESS_TEST_RESULTS["start_alert_count"]="$start_count"
+    STRESS_TEST_RESULTS["end_alert_count"]="$end_count"
+    STRESS_TEST_RESULTS["net_increase"]="$net_increase"
+
+    # Clean up test events
+    log_info "Cleaning up test events..."
+    local cleanup_sql="DELETE FROM alerts.status WHERE Identifier LIKE 'NETCOOL_AUDIT_TEST_$$_%';"
+    echo "$cleanup_sql" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" >/dev/null 2>&1
+
+    local cleanup_count=$(echo "SELECT COUNT(*) FROM alerts.status;" | nco_sql -server "$stress_server" -user "$stress_user" -passwd "$stress_pass" -batch 2>/dev/null | tail -1 | xargs)
+    log_info "Alert count after cleanup: $cleanup_count"
+
+    # Report results
+    echo ""
+    print_subsection "Stress Test Results"
+    log_success "Events injected: $success_count in $injection_duration seconds"
+    log_info "Event injection rate: $events_per_second events/sec"
+    log_info "Injection errors: $error_count"
+    log_info "Net alerts retained: $net_increase (after deduplication/clearing)"
+
+    if [ "$events_per_second" != "N/A" ]; then
+        local eps_int=$(echo "$events_per_second / 1" | bc)
+        if [ "$eps_int" -lt 10 ]; then
+            log_warning "Event processing rate is low (< 10 events/sec) - may indicate performance issues"
+            add_recommendation "HIGH" "Investigate ObjectServer performance - low event insertion rate during stress test"
+        elif [ "$eps_int" -lt 50 ]; then
+            log_info "Event processing rate is moderate (10-50 events/sec)"
+        else
+            log_success "Event processing rate is good (> 50 events/sec)"
+        fi
+    fi
+
+    if [ "$error_count" -gt 0 ]; then
+        log_warning "Encountered $error_count errors during event injection"
+        add_recommendation "MEDIUM" "Review ObjectServer logs for errors during stress test"
+    fi
+}
+
 ################################################################################
 # USAGE & ARGUMENT PARSING
 ################################################################################
@@ -223,19 +735,33 @@ Usage: $0 [OPTIONS]
 Options:
     --help              Show this help message
     --output FILE       Save report to specified file (in addition to stdout)
+    --format FORMAT     Output format: text (default), json, or xml
     --no-color          Disable colored output
     --verbose           Enable verbose/debug logging
     --skip-sql          Skip ObjectServer SQL queries (if credentials unavailable)
-    --stress-test       [FUTURE] Enable active stress testing (placeholder)
+
+Stress Testing Options:
+    --stress-test               Enable active stress testing (WARNING: injects events!)
+    --stress-events COUNT       Number of test events to inject (default: 100)
+    --stress-duration SECONDS   Duration of stress test in seconds (default: 60)
+
+Historical Trending Options:
+    --enable-trending           Save results for historical comparison
+    --compare-previous          Compare with previous audit results
+    --history-dir DIR           Directory for historical data (default: ~/.netcool_audit_history)
 
 Examples:
-    $0                                    # Run with default settings
-    $0 --output /tmp/netcool_audit.txt    # Save report to file
-    $0 --skip-sql --no-color              # Run without SQL checks, no colors
+    $0                                                  # Run standard audit
+    $0 --format json --output report.json              # JSON output
+    $0 --enable-trending --compare-previous            # Track and compare trends
+    $0 --stress-test --stress-events 500               # Run stress test with 500 events
+    $0 --skip-sql --no-color                           # Run without SQL checks
 
 Notes:
-    - This script is READ-ONLY and safe to run in production
-    - For ObjectServer profiling, you'll be prompted for credentials
+    - Standard audit mode is READ-ONLY and safe for production
+    - --stress-test mode WILL inject synthetic events into ObjectServer
+    - Stress testing requires ObjectServer credentials and confirmation
+    - Historical trending saves audit results to ~/.netcool_audit_history
     - Run as the Netcool service account for best results
 
 EOF
@@ -250,6 +776,14 @@ parse_arguments() {
                 ;;
             --output)
                 OUTPUT_FILE="$2"
+                shift 2
+                ;;
+            --format)
+                OUTPUT_FORMAT="$2"
+                if [[ ! "$OUTPUT_FORMAT" =~ ^(text|json|xml)$ ]]; then
+                    echo "Error: Invalid format '$OUTPUT_FORMAT'. Must be: text, json, or xml"
+                    exit 1
+                fi
                 shift 2
                 ;;
             --no-color)
@@ -273,8 +807,29 @@ parse_arguments() {
                 ;;
             --stress-test)
                 STRESS_TEST=true
-                log_warning "Stress test mode requested but not yet implemented"
                 shift
+                ;;
+            --stress-events)
+                STRESS_TEST_EVENTS="$2"
+                shift 2
+                ;;
+            --stress-duration)
+                STRESS_TEST_DURATION="$2"
+                shift 2
+                ;;
+            --enable-trending)
+                ENABLE_TRENDING=true
+                shift
+                ;;
+            --compare-previous)
+                COMPARE_WITH_PREVIOUS=true
+                ENABLE_TRENDING=true  # Auto-enable trending if comparing
+                shift
+                ;;
+            --history-dir)
+                HISTORY_DIR="$2"
+                HISTORY_FILE="${HISTORY_DIR}/audit_history.jsonl"
+                shift 2
                 ;;
             *)
                 echo "Unknown option: $1"
@@ -1355,16 +1910,28 @@ main() {
     # Parse command line arguments
     parse_arguments "$@"
 
-    # Print banner
-    clear
-    print_color "$BOLD$CYAN" "╔════════════════════════════════════════════════════════════╗"
-    print_color "$BOLD$CYAN" "║   Netcool Environment Audit & Benchmark Tool v${SCRIPT_VERSION}      ║"
-    print_color "$BOLD$CYAN" "║   IBM Tivoli Netcool/OMNIbus Health Assessment            ║"
-    print_color "$BOLD$CYAN" "╚════════════════════════════════════════════════════════════╝"
-    echo ""
-    print_color "$CYAN" "Starting audit at: $TIMESTAMP"
-    print_color "$CYAN" "This script performs READ-ONLY operations and is safe for production"
-    echo ""
+    # Print banner (skip if JSON/XML output)
+    if [ "$OUTPUT_FORMAT" = "text" ]; then
+        clear
+        print_color "$BOLD$CYAN" "╔════════════════════════════════════════════════════════════╗"
+        print_color "$BOLD$CYAN" "║   Netcool Environment Audit & Benchmark Tool v${SCRIPT_VERSION}      ║"
+        print_color "$BOLD$CYAN" "║   IBM Tivoli Netcool/OMNIbus Health Assessment            ║"
+        print_color "$BOLD$CYAN" "╚════════════════════════════════════════════════════════════╝"
+        echo ""
+        print_color "$CYAN" "Starting audit at: $TIMESTAMP"
+
+        if [ "$STRESS_TEST" = true ]; then
+            print_color "$BOLD$YELLOW" "⚠️  STRESS TEST MODE ENABLED - NOT READ-ONLY ⚠️"
+        else
+            print_color "$CYAN" "This script performs READ-ONLY operations and is safe for production"
+        fi
+
+        if [ "$ENABLE_TRENDING" = true ]; then
+            print_color "$CYAN" "Historical trending enabled - results will be saved"
+        fi
+
+        echo ""
+    fi
 
     # Discovery phase
     detect_os
@@ -1390,8 +1957,51 @@ main() {
     # Probe and gateway checks
     check_probes_gateways
 
-    # Generate final report
-    generate_final_report
+    # Run stress test if enabled (after standard audits)
+    if [ "$STRESS_TEST" = true ]; then
+        run_stress_test
+    fi
+
+    # Compare with previous audit if requested (before final report)
+    if [ "$COMPARE_WITH_PREVIOUS" = true ]; then
+        compare_with_previous_audit
+    fi
+
+    # Generate final report (text mode only)
+    if [ "$OUTPUT_FORMAT" = "text" ]; then
+        generate_final_report
+    fi
+
+    # Save to historical database if enabled
+    if [ "$ENABLE_TRENDING" = true ]; then
+        save_audit_to_history
+    fi
+
+    # Generate JSON/XML output if requested
+    case "$OUTPUT_FORMAT" in
+        json)
+            if [ -n "$OUTPUT_FILE" ]; then
+                generate_json_output "$OUTPUT_FILE"
+                log_info "JSON output saved to: $OUTPUT_FILE"
+            else
+                generate_json_output
+            fi
+            ;;
+        xml)
+            if [ -n "$OUTPUT_FILE" ]; then
+                generate_xml_output "$OUTPUT_FILE"
+                log_info "XML output saved to: $OUTPUT_FILE"
+            else
+                generate_xml_output
+            fi
+            ;;
+        text)
+            # Text output already generated by generate_final_report
+            if [ -n "$OUTPUT_FILE" ]; then
+                log_info "Text output also saved to: $OUTPUT_FILE"
+            fi
+            ;;
+    esac
 
     # Return appropriate exit code
     if [ ${#FAILURES[@]} -gt 0 ]; then
