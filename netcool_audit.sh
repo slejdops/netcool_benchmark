@@ -67,32 +67,72 @@ HOSTNAME=$(hostname)
 
 ################################################################################
 # IBM RECOMMENDED BASELINES (Embedded Best Practices)
+#
+# All baseline values are derived from official IBM documentation, best practices
+# guides, and IBM support technotes. For detailed references and sources, see:
+# IBM_BASELINE_REFERENCES.md
+#
+# Key IBM Documentation Sources:
+# - IBM Netcool Performance Manager: Kernel Settings
+#   https://www.ibm.com/docs/en/tnpm/1.4.4?topic=parameters-linux-kernel-settings
+# - IBM WebSphere ulimit Guidelines
+#   https://www.ibm.com/support/pages/guidelines-setting-ulimits-websphere-application-server
+# - IBM Netcool/OMNIbus 8.1 Best Practices Guide
+# - IBM Netcool/Impact Administration Guide
+#   https://www.ibm.com/docs/en/tivoli-netcoolimpact/7.1.0
 ################################################################################
 
 # OS Level Baselines
+# Source: IBM WebSphere technotes, Netcool deployment guides
 BASELINE_ULIMIT_NOFILE=65536           # Minimum open files limit
+                                       # IBM Ref: WebSphere ulimit recommendations
+                                       # Netcool requires 2-3x ObjectServer connections
+
+# Source: IBM Tivoli Netcool Performance Manager Documentation
+# URL: https://www.ibm.com/docs/en/tnpm/1.4.4?topic=parameters-linux-kernel-settings
+# Format: kernel.sem = SEMMSL SEMMNS SEMOPM SEMMNI
 BASELINE_KERNEL_SEMMSL=250             # Semaphores per set
 BASELINE_KERNEL_SEMMNS=32000           # Total semaphores system-wide
-BASELINE_KERNEL_SEMOPM=32              # Max operations per semop call
+BASELINE_KERNEL_SEMOPM=100             # Max operations per semop call (IBM: 100)
 BASELINE_KERNEL_SEMMNI=128             # Max number of semaphore sets
 
 # ObjectServer Baselines
-BASELINE_OBJSERV_MIN_MEMORY_MB=2048    # Minimum memory allocation
-BASELINE_OBJSERV_MAX_CONNECTIONS=1000   # Warning threshold for connections
+# Source: IBM Netcool/OMNIbus Best Practices Guide
+BASELINE_OBJSERV_MIN_MEMORY_MB=2048    # Minimum memory allocation (2GB)
+                                       # Small: 1-2GB, Medium: 2-4GB, Large: 4GB+
+BASELINE_OBJSERV_MAX_CONNECTIONS=1000  # Warning threshold for connections
+                                       # Default limit often 1024, monitor usage
 BASELINE_MAX_TRIGGERS_DISABLED=5       # Max acceptable disabled triggers
+                                       # Review disabled triggers regularly
 BASELINE_PROFILER_TRIGGER_MS=100       # Trigger execution time threshold (ms)
+                                       # Source: IBM trigger profiling best practices
+
+# alerts.status Table Size
+# Source: IBM Netcool/OMNIbus 7.4 Best Practices - "Monitoring row numbers"
+# Small system: <10,000 rows | Medium: 10,000-50,000 | Large: >50,000
+BASELINE_ALERTS_STATUS_WARNING=50000   # Warning threshold for alerts.status rows
 
 # Impact Baselines
+# Source: IBM Netcool/Impact Administration Guide
+# URL: https://www.ibm.com/docs/en/tivoli-netcoolimpact/7.1.0
 BASELINE_IMPACT_HEAP_MIN_GB=4          # Minimum heap for production
+                                       # IBM Default: 2.4GB explicitly insufficient
+                                       # Production: 4GB+ based on deployment size
 BASELINE_IMPACT_HEAP_MAX_GB=16         # Recommended max heap
+                                       # Above 16GB: consider clustering/scaling
 
 # WebGUI/JazzSM Baselines
+# Source: IBM WebSphere and Netcool deployment guidelines
 BASELINE_WEBGUI_HEAP_MIN_GB=2          # Minimum heap for WebGUI
+                                       # Small: 2GB, Medium: 4GB, Large: 6-8GB
 BASELINE_WEBGUI_HEAP_MAX_GB=8          # Recommended max heap
 
 # Probe/Gateway Baselines
+# Source: IBM Netcool/OMNIbus administration best practices
 BASELINE_PROBE_DISCONNECT_THRESHOLD=10  # Max acceptable disconnects in recent logs
+                                        # Frequent disconnects indicate systematic issues
 BASELINE_GATEWAY_LAG_WARNING_SEC=30    # Gateway replication lag threshold
+                                       # Replication should be near real-time
 
 ################################################################################
 # UTILITY FUNCTIONS
@@ -806,9 +846,11 @@ query_table_statistics() {
             log_info "$table: $row_count rows"
 
             # Check if alerts.status is too large
-            if [ "$table" = "alerts.status" ] && [ "$row_count" -gt 50000 ]; then
+            # IBM Best Practices: Small <10K, Medium 10K-50K, Large >50K rows
+            if [ "$table" = "alerts.status" ] && [ "$row_count" -gt "$BASELINE_ALERTS_STATUS_WARNING" ]; then
                 log_warning "alerts.status table is large ($row_count rows) - may impact performance"
                 add_recommendation "MEDIUM" "Review alert lifecycle and deduplication rules to control alerts.status growth"
+                add_recommendation "MEDIUM" "IBM Guidance: Medium systems 10K-50K rows, monitor performance at >50K"
             fi
         fi
     done
